@@ -6,22 +6,21 @@ model sees them and an audit trail in the agency's SQL Server.
 
 Status: plan only. Nothing built yet. Decisions recorded 2026-09-30, reframed 2026-10-01.
 
-## 0. Threat model
+## 0. Purpose
 
-**Who we are.** A development team inside a criminal-justice government shop. The users are
-fellow developers using Claude Code: the CLI, the IDE extensions, and the Claude desktop
-app's Code tab.
+Developers in a criminal-justice agency use Claude Code every day: the CLI, the IDE
+extensions, and the Claude desktop app's Code tab. In ordinary work, a stack trace, a log
+line, a query result, or a JSON fixture gets pasted into the conversation, or Claude reads
+a file or runs a query that returns one. Those can contain names, SSNs, driver's licence
+numbers, SIDs, UCNs, dates of birth, and secrets such as connection strings and API keys.
 
-**What we protect against.** Raw identifiers (names, SSNs, driver's licence numbers, SIDs,
-UCNs, DOBs next to names) and secrets (connection strings, API keys) reaching Anthropic's
-API. The typical path is ordinary work: a stack trace, a log line, a query result, or a
-JSON fixture pasted into the context window, or a file or query result that Claude reads
-on the developer's behalf.
+This project stops that data from reaching Anthropic's API. It replaces each identifier
+with a placeholder before the request leaves the network, and records that it did so.
 
-**Auth.** The design assumes **pass-through OAuth**: the proxy forwards each user's bearer token untouched, never
-stores or logs it, and holds no Anthropic API key of its own. User identity for audit comes
-from the first network hop (mTLS per workstation, or Windows Integrated auth on the proxy),
-never from the OAuth token.
+Developers keep signing in with their own Claude accounts. The proxy forwards each user's
+bearer token untouched, never stores or logs it, and holds no Anthropic API key of its own.
+The audit trail identifies the user from the first network hop (a per-workstation client
+certificate, or Windows Integrated auth on the proxy), never from that token.
 
 ---
 
@@ -409,7 +408,7 @@ Goal: a developer or an admin can roll it out without reading this plan.
 
 - [ ] Indirect identifiers: configurable gazetteers for agency-specific field names,
       internal system IDs, and anything the recall gate shows leaking.
-- [ ] Threat model document: what Anthropic's logs can contain (surrogates only), what the
+- [ ] Written risk summary: what Anthropic's logs can contain (surrogates only), what the
       proxy host can contain (the audit queue; hence disk encryption), what a prompt-injected
       tool result can do (OpenAPPA's trust rank handles it).
 - [ ] **Do not claim compliance.** That determination belongs to the agency's CJIS Systems
