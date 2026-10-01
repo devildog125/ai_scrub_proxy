@@ -1,0 +1,26 @@
+# .NET build output
+bin/
+obj/
+*.user
+*.suo
+.vs/
+TestResults/
+
+# NER model weights are downloaded by script, never committed
+models/*
+!models/.gitkeep
+!models/download.*
+
+# Real environment files hold connection strings; only the example is tracked
+.env
+.env.*
+!.env.example
+
+# Claude Code local state and caches
+.claude/settings.local.json
+.claude/.cc-writes/
+.claude/sdd-cache/
+.claude/.simplify-ignore-cache/
+
+# OS noise
+.DS_Store
