@@ -12,15 +12,11 @@ Status: plan only. Nothing built yet. Decisions recorded 2026-09-30, reframed 20
 fellow developers using Claude Code: the CLI, the IDE extensions, and the Claude desktop
 app's Code tab.
 
-**The adversary is a well-meaning developer.** They paste a stack trace, a log line, a query
-result, or a JSON fixture that contains CJI or PII into their context window. Or they ask
-Claude to read a file or run a query, and the result contains it. Nobody is attacking the
-system. The failure mode is an ordinary workday.
-
 **What we protect against.** Raw identifiers (names, SSNs, driver's licence numbers, SIDs,
 UCNs, DOBs next to names) and secrets (connection strings, API keys) reaching Anthropic's
-API. Not: a developer who deliberately exfiltrates data by other means. That is an HR and
-network-policy problem, not a proxy problem.
+API. The typical path is ordinary work: a stack trace, a log line, a query result, or a
+JSON fixture pasted into the context window, or a file or query result that Claude reads
+on the developer's behalf.
 
 **Auth.** The design assumes **pass-through OAuth**: the proxy forwards each user's bearer token untouched, never
 stores or logs it, and holds no Anthropic API key of its own. User identity for audit comes
