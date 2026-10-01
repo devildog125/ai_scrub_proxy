@@ -54,8 +54,9 @@ Why this split is right for CJIS:
 
 - The *decision* that data was restricted is deterministic and logged by OpenAPPA, not by a
   probabilistic classifier. Auditors like that.
-- The *detection* (regex + local NER) is probabilistic. Keeping it in a single, testable,
-  measurable component means we can report recall per entity type and improve it in isolation.
+- The *detection* is deterministic too: a registry of rules, no learned model. Every
+  replacement traces to a rule ID, so an auditor can ask "why was this scrubbed?" and get
+  an answer. Same input, same output, every run. Recall and precision are measured per rule.
 - Everything runs on-prem. OpenAPPA's engine makes no network or file calls; ai_scrub_proxy
   makes none either. Only the sanitized text reaches the LLM.
 
@@ -87,7 +88,8 @@ sanitizer `url` and the exact response it expects. Read `appa-policy/src` and
                             ◀─replace_output─ sanitized tool output ◀──
  POST /v1/messages  ──────────────────────▶ ai_scrub_proxy (.NET)
    Authorization: Bearer <user OAuth>          identity from mTLS / Windows Integrated (hop 1)
-                                               sanitize messages[] (regex + local NER)
+                                               detect: rule registry, in-process, no ML
+                                               pseudonymize: session-stable surrogates
                                                audit row → local durable queue → SQL Server
                                                forward, bearer untouched ──▶ api.anthropic.com
                             ◀────────────── response streamed back, plus a feedback note:
@@ -97,8 +99,9 @@ sanitizer `url` and the exact response it expects. Read `appa-policy/src` and
 
 Deployable pieces in this repo:
 
-1. **`AiScrubProxy.Core`** (class library). Detect → pseudonymize with session-consistent
-   surrogates. Zero network. Zero file I/O except reading the ONNX model at startup.
+1. **`AiScrubProxy.Core`** (class library). The rule registry loader, the two-stage
+   scanner, span merging, and pseudonymization with session-consistent surrogates.
+   Zero network. Zero file I/O except loading the registry at startup. See §4a.
 2. **`AiScrubProxy.Proxy`** (ASP.NET Core). Anthropic-API-compatible. Sanitizes
    `/v1/messages` request bodies, forwards everything else untouched, streams responses.
    Also serves OpenAPPA's sanitizer HTTP contract on `/sanitize` and `/healthz`.
@@ -114,13 +117,23 @@ strongly "pointed at the proxy" can be enforced.
 
 | Client | How it's pointed | How it's enforced |
 |---|---|---|
-| **a. CLI in a compose stack** | `claude-code` container with `ANTHROPIC_BASE_URL` set; sidecars: `ai_scrub_proxy`, `openappa`; external SQL Server | Container egress allowlist = proxy only. Strongest. |
+| **a. CLI in a compose stack** | `claude-code` container with `ANTHROPIC_BASE_URL` set; sidecars: `ai_scrub_proxy` (.NET), `openappa`; external SQL Server | Container egress allowlist = proxy only. Strongest. |
 | **b. CLI and IDE extensions on a workstation** | Same settings file and env var | Workstation network policy. |
-| **c. Claude desktop app, Code tab** | Same engine and settings underneath, so hooks and `ANTHROPIC_BASE_URL` carry over | Managed settings that disable every side channel that bypasses the proxy: Artifact publishing, Remote Control, cloud sessions, and MCP connectors (Gmail, Drive, Calendar, Chrome, etc.). |
+| **c. Claude desktop app, Code tab** | Same engine and settings underneath, so hooks and `ANTHROPIC_BASE_URL` carry over | Managed settings that pin `ANTHROPIC_BASE_URL` in the `env` block, define the OpenAPPA hooks so developers can't remove them, and disable Artifact publishing. |
 
-**Desktop app deliverables.** The managed-settings file is a tracked artefact in
-`deploy/desktop/`, with a check that it survives app updates. If Phase 0 shows any side
-channel cannot be disabled, the desktop app drops to **unsupported** and this section says why.
+**Desktop app: what managed settings do and don't lock down (v1 decisions).**
+
+- **Locked:** `ANTHROPIC_BASE_URL`, the OpenAPPA hook definitions, Artifact publishing off.
+- **Allowed without restriction:** MCP connectors (Gmail, Drive, Calendar, Chrome, etc.).
+  OpenAPPA covers data coming *in* from them via the `tool_result` hook, and the
+  default-public policy rule in Phase 3 blocks outbound connector calls once a session is
+  tainted. See §7 for the gap this leaves.
+- **Left as shipped:** web search, web fetch, built-in browser, computer use, cloud
+  sessions, Remote Control, bypass-permissions mode. Recorded as a decision in §7.
+
+The managed-settings file is a tracked deliverable in `deploy/desktop/`, with a check that
+it survives app updates. If Phase 0 shows Artifact publishing can't be disabled, that is
+recorded as a gap in §7; the desktop app stays supported.
 
 **Local state is in scope.** Transcripts under `~/.claude/projects` and the desktop app's
 local data can contain CJI that was typed or read before sanitization. Every client needs
@@ -129,16 +142,19 @@ the requirement; the agency's endpoint management enforces it.
 
 ## 4. .NET stack and licenses
 
-Presidio is Python-only, so the detection layer is rebuilt natively. All dependencies MIT
-unless noted.
+Detection is native .NET and rule-based. No Python, no Presidio, no NER or any other
+learned model. All dependencies MIT unless noted.
 
 | Need | Choice | License | Notes |
 |---|---|---|---|
 | Runtime | .NET 10 LTS | MIT | |
-| Structured identifiers | `System.Text.RegularExpressions` with `[GeneratedRegex]` | stdlib | SSN, phone, email, VIN, plate, FBI UCN, SID, case/docket formats |
-| Names, locations, orgs | ONNX Runtime + a token-classification NER model | MIT (runtime); model license varies, check per model | Run fully local. Candidate: a DeBERTa/RoBERTa NER fine-tune exported to ONNX |
-| Tokenizer | `Microsoft.ML.Tokenizers` | MIT | WordPiece/BPE for the chosen model |
-| Secrets | gitleaks-style patterns ported to `[GeneratedRegex]` | stdlib (gitleaks rules are MIT) | Connection strings, API keys, bearer tokens, private key headers |
+| Rule registry | YAML files under `recognizers/`, loaded at startup | n/a | One entry per type: id, category, shape, pattern, context words, validator, source. See §4a |
+| Pattern matching | `System.Text.RegularExpressions`, compiled and cached; `[GeneratedRegex]` for the hot-path shape classifier | stdlib | Thousands of patterns are fine because the shape prefilter means only a handful run per token |
+| Field-name dictionary | YAML under `recognizers/fields/`, generated from NIEM, NIBRS, and the agency's own schemas | n/a | Column names and JSON keys → category. Highest-precision signal in developer artefacts |
+| Name lists | Public-domain surname and given-name lists (US Census) as gazetteers | public domain | Free-text name detection without a model. Only fires with context (see §4a) |
+| Validators | Check-digit and format validators in C# (`IValidator`) | stdlib | VIN check digit, SSN area rules, date plausibility. Cut false positives |
+| Secrets | gitleaks-style patterns ported into the registry | gitleaks rules are MIT | Connection strings, API keys, bearer tokens, private key headers |
+| Registry import tool | `tools/ImportTaxonomy`, a .NET console app | stdlib + YAML lib (MIT) | Reads NIEM XSD and NIBRS element lists, emits taxonomy and field-name YAML |
 | HTTP | ASP.NET Core minimal API | MIT | |
 | Reverse proxy | YARP (`Microsoft.ReverseProxy`) | MIT | Default route forwards non-Messages paths untouched; custom transform on `/v1/messages` |
 | Surrogate map | In-memory `ConcurrentDictionary`, session-scoped, TTL | stdlib | Keeps `<PERSON_A>` stable within a session. No rehydration, so nothing sensitive persists |
@@ -146,11 +162,74 @@ unless noted.
 | Audit store | External SQL Server via `Microsoft.Data.SqlClient` | MIT (client); SQL Server itself is commercially licensed | See §5a. Dev/test uses the Developer edition container |
 | Audit tests | `Testcontainers.MsSql` | MIT | Spins up SQL Server in CI; no shared test database |
 
-**Flag:** the NER model is the one dependency whose license must be checked at selection
-time. Some strong NER checkpoints are CC-BY-NC or research-only. Pick an Apache/MIT one.
+**Not using:** any cloud PII API (Azure AI Language PII, AWS Comprehend), because raw text
+would leave the enclave. Any NER or other learned model, because a replacement that can't
+be explained by a rule can't be audited, and a model's behaviour can shift with a retrain.
+Presidio, because it is Python and its NER path is a model.
 
-**Not using:** any cloud PII API (Azure AI Language PII, AWS Comprehend). They are
-disqualified for CJI regardless of how good they are, because raw text would leave the enclave.
+## 4a. Detection design: a deterministic rule registry
+
+The requirement is thousands of CJI and PII types, every one explainable. That rules out
+hand-written code per type and rules out models. The design is a data-driven registry with
+a prefilter so cost stays flat as the registry grows.
+
+**One registry entry per type.** YAML, one file per source family, loaded at startup:
+
+```yaml
+- id: MO_DL_NUMBER            # stable, referenced by audit rows
+  category: DRIVERS_LICENSE   # what Claude sees: <DL_A>
+  source: "Agency DMV data dictionary v3"   # where the rule came from
+  shape: "A999999999"         # prefilter key, see below
+  pattern: "^[A-Z][0-9]{9}$"
+  context: ["DL", "DLN", "license", "licence", "OLN"]   # words nearby that raise confidence
+  validator: none             # or a named C# IValidator, e.g. VinCheckDigit
+  confidence: 0.8             # with context → 1.0; below threshold → not replaced
+  examples: ["A123456789"]    # feeds the synthetic corpus and the per-rule test
+```
+
+**Two-stage scan, so thousands of rules don't mean thousands of regex passes.**
+
+1. **Shape classification.** One compiled pass tokenises the text and labels each token
+   by shape: letter runs, digit runs, separators. `A123456789` becomes `A999999999`.
+   `555-12-3456` becomes `999-99-9999`.
+2. **Rule dispatch.** Each shape maps to the short list of rules that could match it.
+   Only those run their pattern, context check, and validator. A driver's licence rule is
+   never evaluated against something shaped like an email address.
+
+**Field names are the strongest signal and the cheapest.** In JSON, CSV, log lines, and
+SQL grids, the key or column header tells you what the value is. A dictionary mapping
+`ssn`, `social_security_number`, `SubjectSSN`, `PersonSSNIdentification` and thousands of
+others to a category catches values regardless of their shape. Generated from NIEM and
+NIBRS element names plus the agency's own schema exports. Never committed with real data.
+
+**Free-text names without a model.** Capitalised tokens that appear in a public-domain
+surname or given-name list, *and* sit next to a context word (`name`, `subject`, `victim`,
+`arrestee`, `DOB`, a title, or a DL/SSN match on the same line). A name list alone would
+flag every `Smith` in a code comment. Context is what keeps precision up. Recall on prose
+will be lower than a model would give; developer artefacts are mostly structured, which is
+why this is acceptable here and the eval corpus has to prove it.
+
+**Categories, not types, for everything downstream.** Claude sees `<DL_A>`, never
+`<MO_DL_NUMBER_A>`. Surrogates are stable per category within a session. The audit row
+stores both the category and the rule ID that fired, so the record is precise without the
+placeholder vocabulary becoming unreadable.
+
+**Every rule carries its own test.** The `examples` field drives the synthetic corpus and
+a per-rule unit test. Adding a type with no examples fails CI. Adding a type that
+collides with an existing rule's negative examples fails CI.
+
+**Sources of truth for the registry, in priority order.**
+
+| Source | Public? | What it gives |
+|---|---|---|
+| NIEM (OASIS NIEMOpen), Core and Justice domains | Yes | Thousands of element names → field-name dictionary and category taxonomy; republished NCIC code lists in its `ncic` namespace |
+| FBI NIBRS technical specification | Yes | Offender, victim, arrestee, property data elements |
+| FBI EBTS | Yes | FBI number (UCN), SID, and biometric record field formats |
+| AAMVA DL/ID card design standard | Yes | Document-level licence formats |
+| US Census surname and given-name files | Yes, public domain | Name gazetteers |
+| gitleaks rules | Yes, MIT | Secret patterns |
+| Agency DMV, court, and RMS data dictionaries | **No** | Per-state formats and local field names. Supplied by the agency, imported by tool, the import output reviewed before commit, raw files never committed |
+| NCIC Code Manual and Operating Manual | **No**, CJIS-restricted | Only via the agency channel. Rules may reference code-list IDs; the lists themselves stay out of the repo |
 
 ## 5a. Audit trail in an external SQL Server
 
@@ -219,19 +298,20 @@ Goal: prove the unknowns that can reshape the architecture before committing to 
       separately on the CLI and on the desktop app. **If this fails, the proxy must become
       a network-level intercept instead, and Phase 2 is a different build.** This is the
       one unknown that can reshape the plan.
-- [ ] **Can managed settings disable the desktop app's side channels?** Artifact
-      publishing, Remote Control, cloud sessions, MCP connectors. Test each. Any that cannot
-      be disabled drops the desktop app to unsupported, and §3a records why.
 - [ ] Confirm the proxy's default route forwards every non-Messages path unsanitized and
       nothing in Claude Code's startup breaks (model listing, OAuth endpoints, telemetry).
-- [ ] Run OpenAPPA locally with its Claude Code playground. Trigger a `tool_result` hook
-      with `replace_output`. Capture the sanitizer request/response JSON on the wire.
-      **This resolves the open item in §2.**
-- [ ] Load one candidate NER model in ONNX Runtime from .NET and tag a synthetic log file
-      and JSON fixture. Measure latency per 1,000 tokens on the target hardware.
+- [ ] **Can managed settings disable Artifact publishing on the desktop app?** If not,
+      record it as a gap in §7. The desktop app stays supported either way.
+- [ ] **Registry scale spike.** Build the shape classifier and rule dispatch with 2,000
+      synthetic rules. Measure latency per 10 KB of mixed log/JSON text on the target
+      hardware. The number has to be low enough that developers don't notice it.
+- [ ] Pull the NIEM release and the NIBRS element list. Run a first pass of the import tool
+      and count how many field names and categories fall out. This sizes Phase 2.
+- [ ] Run OpenAPPA's Claude Code playground. Trigger a block and a sanitize offer. Capture
+      the sanitizer request/response JSON on the wire. **This resolves the open item in §2.**
 
-Exit criterion: a one-page note with the OAuth result, the desktop-app result, the
-sanitizer contract, the chosen model, and its license.
+Exit criterion: a one-page note with the OAuth result, the Artifact-publishing result, the
+registry latency number, the NIEM/NIBRS import count, and the sanitizer contract.
 
 ### Phase 1 — Proxy, sanitize-only
 Goal: every Claude Code client in the shop can point at it and keep working.
@@ -253,22 +333,37 @@ Goal: every Claude Code client in the shop can point at it and keep working.
       Test asserts it.
 - [ ] Bind to loopback or a Unix socket in the compose stack; enclave TLS elsewhere.
 
-### Phase 2 — Recognizers tuned for developer artefacts
-Goal: a recall number on the things developers actually paste.
+### Phase 2 — The rule registry, tuned for developer artefacts
+Goal: recall and precision numbers on the things developers actually paste, with every
+replacement traceable to a rule ID. See §4a for the design.
 
-- [ ] `AiScrubProxy.Core` recognizer interface, span merging, overlap resolution.
-- [ ] Structured identifiers in **tabular output and log lines**: SSN, driver's licence,
-      SID, UCN, DOB adjacent to a name, phone, email, VIN, plate.
-- [ ] **Names in JSON fields** (`"lastName": "..."`, `"subject_name"`), CSV columns, and
-      stack-trace message strings. Field-name context is a strong signal; use it.
+- [ ] `AiScrubProxy.Core`: registry loader, shape classifier, rule dispatch, span merging,
+      overlap resolution, `IValidator` with VIN check digit and SSN area rules.
+- [ ] `tools/ImportTaxonomy`: reads NIEM XSD and the NIBRS element list, emits the
+      category taxonomy and field-name dictionary. Output is reviewed and committed; the
+      tool is re-runnable when a new NIEM release lands.
+- [ ] Hand-authored rules for the structured identifiers that need a pattern: SSN, driver's
+      licence (per state, from agency dictionaries), SID, UCN, docket, DOB adjacent to a
+      name, phone, email, VIN, plate.
+- [ ] **Field-name dictionary** covering JSON keys (`"lastName"`, `"subject_name"`), CSV
+      headers, SQL column names, and log-line labels. Values under a known field are
+      replaced regardless of shape.
+- [ ] **Name gazetteers with context rules**, per §4a. Measure precision on code
+      comments and identifiers specifically; this is where it will hurt.
 - [ ] **Secrets**: gitleaks-style patterns for connection strings, API keys, bearer
       tokens, private-key headers. A pasted connection string is the most common leak.
-- [ ] NER recognizer via ONNX Runtime for free-text names the structured rules miss.
 - [ ] **Synthetic corpus** of developer artefacts with gold labels: logs, CSV exports,
       JSON fixtures, stack traces, SQL result grids. All values invented. No real CJI, ever.
-- [ ] `eval` prints recall and precision per entity type. **Gate: recall ≥ 0.98 on
-      structured identifiers and secrets, ≥ 0.95 on names, before Phase 3.**
-- [ ] Unit tests (xUnit) for every recognizer. Every line commented per house style.
+      Include **negative examples**: code identifiers, GUIDs, version numbers, commit hashes,
+      and variable names that look like PII but aren't.
+- [ ] `eval` prints recall **and precision** per category and per rule. **Gate: recall
+      ≥ 0.98 on structured identifiers and secrets, ≥ 0.95 on names in structured fields,
+      before Phase 3.** Free-text names get a reported number, not a gate, in v1.
+      Precision on code identifiers is reported alongside; false positives are the
+      complaint generator and the reason developers route around the proxy.
+- [ ] Per-rule tests generated from each registry entry's `examples`. A rule with no
+      examples fails CI. Unit tests (xUnit) for the scanner itself. Every line commented
+      per house style.
 
 ### Phase 3 — OpenAPPA tool_result hook
 Goal: tool outputs are cleaned before the model sees them, not just before they leave.
@@ -278,8 +373,16 @@ Goal: tool outputs are cleaned before the model sees them, not just before they 
       ai_scrub_proxy declared as the sanitizer with
       `permits = { audience = { from = ["@cji"], to = ["public"] } }`; `tool_result` hook
       answers `replace_output` with the sanitized text.
+- [ ] **Default rule: any unlisted tool is a `public` destination.** Plus an explicit
+      exception list for enclave-local tools: Read, Edit, and enclave-hosted MCP servers.
+      OpenAPPA receives the tool inventory at `session_start`, so a new connector is covered
+      by the default with no per-connector config. **Verify the default-rule TOML syntax
+      against the contracts page before relying on it.**
+- [ ] **Bash needs a decision.** A shell can reach the network, so it isn't enclave-local
+      by nature. Options: treat Bash as `public` (safe, noisy), or as enclave-local inside
+      the compose stack only, where egress is already allowlisted. Recorded in §8.
 - [ ] `appa replay` policy tests in `policy-tests/`: unsanitized → blocked; sanitized →
-      allowed. Run in CI.
+      allowed; unlisted tool after a `@cji` read → blocked. Run in CI.
 - [ ] Both layers write audit rows tagged with their layer, so a miss at the hook that the
       proxy caught is visible.
 
@@ -300,9 +403,9 @@ Goal: a developer or an admin can roll it out without reading this plan.
       egress allowlist = proxy only, SQL Server connection via env var.
 - [ ] `deploy/workstation/`: settings bundle (`settings.json`, hooks, `ANTHROPIC_BASE_URL`)
       for CLI and IDE extensions, plus the workstation network-policy requirement.
-- [ ] `deploy/desktop/`: managed-settings file for the desktop app that disables Artifact
-      publishing, Remote Control, cloud sessions, and MCP connectors. Include the check
-      that it survives app updates.
+- [ ] `deploy/desktop/`: managed-settings file for the desktop app that pins
+      `ANTHROPIC_BASE_URL`, defines the OpenAPPA hooks, and disables Artifact publishing.
+      Include the check that it survives app updates.
 - [ ] Local-state guidance: disk encryption and retention/purge for `~/.claude/projects`
       and desktop app data.
 
@@ -323,16 +426,23 @@ ai_scrub_proxy/
   PLAN.md                         this file
   AiScrubProxy.sln
   src/
-    AiScrubProxy.Core/             detection, session-consistent surrogates
+    AiScrubProxy.Core/             registry loader, shape classifier, rule dispatch, surrogates
     AiScrubProxy.Proxy/            Anthropic-compatible proxy (YARP) + OpenAPPA /sanitize
     AiScrubProxy.Audit/            IAuditSink, durable queue, SQL Server sink, in-memory sink
     AiScrubProxy.Cli/              sanitize / eval / verify
+  tools/
+    ImportTaxonomy/               NIEM + NIBRS → taxonomy and field-name YAML
+  recognizers/
+    taxonomy.yaml                 categories and their surrogate prefixes
+    fields/                       field-name → category, one file per source
+    patterns/                     shape + pattern + validator rules, one file per family
+    gazetteers/                   public-domain name lists
   tests/
     AiScrubProxy.Core.Tests/       xUnit, one test class per recognizer
     AiScrubProxy.Proxy.Tests/      pass-through, streaming, feedback note, identity rejection
     corpus/                       synthetic dev artefacts + gold labels (JSONL)
   policy/
-    appa.toml                     OpenAPPA policy: tool results @cji, ai_scrub_proxy as sanitizer
+    appa.toml                     OpenAPPA policy: default-public, enclave exceptions, sanitizer
     policy-tests/                 appa replay fixtures
   deploy/
     compose/                      claude-code + ai_scrub_proxy + openappa, egress = proxy only
@@ -341,7 +451,6 @@ ai_scrub_proxy/
   db/
     migrations/                   versioned SQL scripts, applied by a DBA, never by the service
   .env.example                    AI_SCRUB_PROXY_AUDIT_CONNECTION and friends, dummy values
-  models/                         .gitignored; download script + checksum, not the weights
 ```
 
 ## 7. Risks, stated plainly
@@ -355,10 +464,25 @@ ai_scrub_proxy/
   rather than pretend otherwise.
 - **OAuth through a custom base URL is unverified.** If login or refresh breaks, the proxy
   becomes a network intercept and Phase 1 changes shape. Phase 0 settles it first.
-- **NER recall on developer artefacts is unproven.** Generic NER is trained on prose, not
-  on JSON keys, log lines, and CSV grids. Field-name context and structured rules carry
-  most of the load. Mitigation: the Phase 2 recall gate; fine-tune on synthetic data if it
-  stays low.
+- **MCP connectors are open in v1.** OpenAPPA's `tool_result` hook sanitizes data coming
+  in from connectors, and the default-public policy rule blocks outbound connector calls
+  once a session is tainted. **The gap:** CJI pasted directly into a prompt never passes
+  through a tool, so OpenAPPA can't taint the session. The proxy is the only cover for that
+  path. Decision recorded; revisit if the proxy's recall numbers don't hold.
+- **Cloud sessions and Remote Control carry context through Anthropic's infrastructure
+  without touching the proxy.** Left enabled by decision in v1. Same for web search, web
+  fetch, built-in browser, computer use, and bypass-permissions mode.
+- **No model means free-text names depend on gazetteers plus context.** A name in a
+  sentence with no nearby context word will be missed. Accepted: developer artefacts are
+  mostly structured, the field-name dictionary covers those, and the trade is a scrubber
+  every replacement of which can be explained. The eval corpus reports the free-text
+  number so the gap is visible, not hidden.
+- **Thousands of rules is a maintenance surface.** Mitigation: rules are data with a
+  source field and their own examples, the import tool regenerates the standards-derived
+  parts, and CI fails on a rule without a test.
+- **False positives on code identifiers will make developers route around the proxy.**
+  Mitigation: validators, context requirements, negative examples in the corpus, and
+  precision reported per rule so the noisy ones are findable.
 - **A sanitizer that passes OpenAPPA's `permits` is trusted to be correct.** OpenAPPA will
   happily forward whatever we return as `public`. Our recall number *is* the security
   boundary. Treat the eval corpus as production code.
@@ -370,11 +494,16 @@ ai_scrub_proxy/
 
 ## 8. Decisions still open
 
-1. Which NER model. Decided by the Phase 0 spike, constrained by license.
+1. Whether the agency has an existing list or data dictionary to seed the registry, or
+   whether Phase 2 starts from NIEM and NIBRS alone.
 2. How the feedback note reaches the developer: trailing text block in the response, a
    response header the client ignores, or a hook-side message. Decided in Phase 0 once
    we see what each client renders.
 3. Whether block mode ships on by default for SID and UCN, or stays opt-in.
+4. How OpenAPPA treats Bash: `public` everywhere, or enclave-local inside the compose stack
+   where egress is already allowlisted. See Phase 3.
+5. Whether Artifact publishing can be disabled by managed settings. Phase 0 answers it;
+   if not, it becomes a recorded gap in §7.
 
 ## 9. Later, if ever
 
