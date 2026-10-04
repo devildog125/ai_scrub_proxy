@@ -1,0 +1,10 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <!-- Phase 0 latency spike: 2,000 synthetic rules against 10 KB and 200 KB developer text. Stopwatch only, no benchmark dependency. -->
+  <PropertyGroup>
+    <OutputType>Exe</OutputType>   <!-- A console program that prints a table and writes docs/phase0/registry-latency.md. -->
+    <IsPackable>false</IsPackable> <!-- Never packaged. -->
+  </PropertyGroup>
+  <ItemGroup>
+    <ProjectReference Include="..\..\src\AiScrubProxy.Core\AiScrubProxy.Core.csproj" /> <!-- The code being measured. -->
+  </ItemGroup>
+</Project>

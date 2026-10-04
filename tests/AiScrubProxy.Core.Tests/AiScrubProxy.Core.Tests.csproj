@@ -1,0 +1,19 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <!-- xUnit tests for the detection core: shapes, dispatch, validators, per-rule examples. -->
+  <PropertyGroup>
+    <IsPackable>false</IsPackable> <!-- Test projects are never packaged. -->
+  </PropertyGroup>
+  <ItemGroup>
+    <PackageReference Include="Microsoft.NET.Test.Sdk" Version="17.14.1" /> <!-- Test host, MIT. -->
+    <PackageReference Include="xunit" Version="2.9.3" />                     <!-- Test framework, Apache-2.0. -->
+    <PackageReference Include="xunit.runner.visualstudio" Version="3.1.4" /> <!-- Runner adapter for `dotnet test`, Apache-2.0. -->
+  </ItemGroup>
+  <ItemGroup>
+    <Using Include="Xunit" /> <!-- Every test file gets the xUnit namespace without repeating the using. -->
+  </ItemGroup>
+  <ItemGroup>
+    <ProjectReference Include="..\..\src\AiScrubProxy.Core\AiScrubProxy.Core.csproj" /> <!-- The system under test. -->
+    <!-- The real registry files ship next to the test binary so the per-rule example tests read the same YAML the proxy will. -->
+    <None Include="..\..\recognizers\**\*.yaml" Link="recognizers\%(RecursiveDir)%(Filename)%(Extension)" CopyToOutputDirectory="PreserveNewest" />
+  </ItemGroup>
+</Project>

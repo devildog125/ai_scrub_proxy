@@ -1,0 +1,6 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <!-- Detection core: rule registry, shape classifier, dispatch. No network, no file I/O except loading the registry. -->
+  <ItemGroup>
+    <PackageReference Include="YamlDotNet" Version="18.1.0" /> <!-- YAML parser for the rule registry files, MIT. -->
+  </ItemGroup>
+</Project>

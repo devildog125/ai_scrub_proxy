@@ -1,0 +1,6 @@
+<Project Sdk="Microsoft.NET.Sdk.Web">
+  <!-- Anthropic-API-compatible pass-through proxy. Phase 0: forwards everything untouched and logs only paths and header names. -->
+  <ItemGroup>
+    <PackageReference Include="Yarp.ReverseProxy" Version="2.3.0" /> <!-- Microsoft's reverse proxy library, MIT. Handles streaming and header forwarding. -->
+  </ItemGroup>
+</Project>

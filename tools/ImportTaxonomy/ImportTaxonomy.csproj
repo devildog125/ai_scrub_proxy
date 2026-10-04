@@ -1,0 +1,7 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <!-- Reads NIEM XSD files and emits field-name YAML plus a count summary. Standard library only (System.Xml.Linq). -->
+  <PropertyGroup>
+    <OutputType>Exe</OutputType>   <!-- Command-line tool, run by a developer, never by the service. -->
+    <IsPackable>false</IsPackable> <!-- Never packaged. -->
+  </PropertyGroup>
+</Project>

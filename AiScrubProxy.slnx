@@ -1,0 +1,14 @@
+<Solution>
+  <Folder Name="/src/">
+    <Project Path="src/AiScrubProxy.Core/AiScrubProxy.Core.csproj" />
+    <Project Path="src/AiScrubProxy.Proxy/AiScrubProxy.Proxy.csproj" />
+  </Folder>
+  <Folder Name="/tests/">
+    <Project Path="tests/AiScrubProxy.Core.Bench/AiScrubProxy.Core.Bench.csproj" />
+    <Project Path="tests/AiScrubProxy.Core.Tests/AiScrubProxy.Core.Tests.csproj" />
+    <Project Path="tests/AiScrubProxy.Proxy.Tests/AiScrubProxy.Proxy.Tests.csproj" />
+  </Folder>
+  <Folder Name="/tools/">
+    <Project Path="tools/ImportTaxonomy/ImportTaxonomy.csproj" />
+  </Folder>
+</Solution>
